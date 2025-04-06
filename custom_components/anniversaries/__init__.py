@@ -1,99 +1,107 @@
-"""The Anniversaries Integration"""
+"""The Anniversaries Integration."""
+import asyncio
 import logging
-from homeassistant import config_entries
-from homeassistant.helpers import discovery
+from datetime import timedelta
 
-from integrationhelper.const import CC_STARTUP_VERSION
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import Config, HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.config_validation import CONFIG_SCHEMA
 
 from .const import (
     CONF_SENSORS,
-    CONF_DATE_TEMPLATE,
     DOMAIN,
     ISSUE_URL,
-    PLATFORM,
+    CC_STARTUP_VERSION,
     VERSION,
     CONFIG_SCHEMA,
 )
+from . import services
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_setup(hass, config):
-    """Set up this component using YAML."""
+
+async def async_setup(hass: HomeAssistant, config: Config):
+    """Set up this integration using YAML is not supported."""
     if config.get(DOMAIN) is None:
-        # Config flow setup if no YAML config exists
+        # We get here if the integration is set up using config flow
         return True
 
-    # Log startup message
-    _LOGGER.info(
+    hass.async_create_task(
         CC_STARTUP_VERSION.format(name=DOMAIN, version=VERSION, issue_link=ISSUE_URL)
     )
+
+    # Register services
+    await services.async_register_services(hass)
 
     platform_config = config[DOMAIN].get(CONF_SENSORS, {})
 
     # If no platform is enabled, skip setup
     if not platform_config:
-        return False
+        return True
 
-    # Load platform configuration for each entry
-    for entry in platform_config:
+    # Skip setup if already configured
+    if hass.data.get(DOMAIN):
+        return True
+
+    # Set up global data
+    hass.data[DOMAIN] = {}
+
+    # Load the platform from YAML config
+    if platform_config:
         hass.async_create_task(
-            discovery.async_load_platform(hass, PLATFORM, DOMAIN, entry, config)
+            hass.helpers.discovery.async_load_platform(
+                "sensor", DOMAIN, platform_config, config
+            )
         )
-
-    # Initiate config flow to import YAML config
-    hass.async_create_task(
-        hass.config_entries.flow.async_init(
-            DOMAIN, context={"source": config_entries.SOURCE_IMPORT}, data={}
-        )
-    )
-
     return True
 
-async def async_setup_entry(hass, config_entry):
-    """Set up this integration using UI."""
-    if config_entry.source == config_entries.SOURCE_IMPORT:
-        # Remove UI config entry if set up via YAML
-        await hass.config_entries.async_remove(config_entry.entry_id)
-        return False
 
-    # Log startup message
-    _LOGGER.info(
+async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
+    """Set up this integration using UI."""
+    if hass.data.get(DOMAIN) is None:
+        hass.data[DOMAIN] = {}
+
+    hass.async_create_task(
         CC_STARTUP_VERSION.format(name=DOMAIN, version=VERSION, issue_link=ISSUE_URL)
     )
+
+    # Register services
+    await services.async_register_services(hass)
 
     # Safely update entry options if needed
     hass.config_entries.async_update_entry(
         config_entry, options=config_entry.data
     )
 
-    # Add update listener for configuration changes
-    config_entry.add_update_listener(update_listener)
+    try:
+        # Load the platform again
+        await hass.config_entries.async_forward_entry_setup(config_entry, "sensor")
 
-    # Set up the platforms using the new `async_forward_entry_setups`
-    await hass.config_entries.async_forward_entry_setups(config_entry, [PLATFORM])
+        # Add update listener
+        config_entry.add_update_listener(update_listener)
 
-    return True
-
-async def async_unload_entry(hass, config_entry):
-    """Unload a config entry."""
-    # Unload the platform using the new `async_forward_entry_unload`
-    if await hass.config_entries.async_forward_entry_unload(config_entry, [PLATFORM]):
-        _LOGGER.info(f"Successfully unloaded {PLATFORM} for {DOMAIN}")
         return True
-    else:
-        _LOGGER.error(f"Error unloading {PLATFORM} for {DOMAIN}")
+    except Exception as error:
+        raise ConfigEntryNotReady from error
+
+
+async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
+    """Handle removal of an entry."""
+    try:
+        await hass.config_entries.async_forward_entry_unload(config_entry, "sensor")
+        _LOGGER.info(
+            "Successfully removed sensor from the %s integration", DOMAIN,
+        )
+        return True
+    except ValueError:
+        _LOGGER.error("Failed to remove sensor from the %s integration", DOMAIN)
         return False
 
-async def async_remove_entry(hass, config_entry):
-    """Handle removal of a config entry."""
-    # Ensure the platform is unloaded before removing the entry
-    await async_unload_entry(hass, config_entry)
-    _LOGGER.info(f"Successfully removed entry for {DOMAIN}")
 
 async def update_listener(hass, entry):
-    """Handle updates to the config entry."""
-    # Update the entry's data based on options
-    hass.config_entries.async_update_entry(entry, data=entry.options)
+    """Update listener."""
+    _LOGGER.debug("Updating listener")
 
     # Unload and reload platform to apply new settings
     await async_unload_entry(hass, entry)
